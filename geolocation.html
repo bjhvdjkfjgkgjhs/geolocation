@@ -1,55 +1,159 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Live Location Map</title>
-  <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
-  <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
-  <style>
-    body, html {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-    }
-    #map {
-      width: 100%;
-      height: 100%;
-    }
-  </style>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Leaflet — RadarOmega-Style Dot + Orientation Tick</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  html,body,#map{height:100%;margin:0;background:#000}
+
+  /* Dot + pulse */
+  .dot-wrap{position:relative;width:20px;height:20px;transform-origin:50% 50%}
+  .loc-dot{
+    position:absolute;left:50%;top:50%;
+    width:18px;height:18px;border-radius:50%;
+    border:3px solid #fff;background:#1a73e8;transform:translate(-50%,-50%);
+    box-shadow:0 0 12px rgba(26,115,232,.85);
+  }
+  .pulse{
+    position:absolute;left:50%;top:50%;
+    width:22px;height:22px;border-radius:50%;background:rgba(26,115,232,.35);
+    transform:translate(-50%,-50%);animation:pulse 2s infinite;
+  }
+  @keyframes pulse{
+    0%{transform:translate(-50%,-50%) scale(.8);opacity:.7}
+    70%{transform:translate(-50%,-50%) scale(2.2);opacity:0}
+    100%{transform:translate(-50%,-50%) scale(.8);opacity:0}
+  }
+
+  /* Small orientation tick (like RadarOmega) */
+  .heading-tick{
+    position:absolute;left:50%;top:50%;
+    width:10px;height:3px;border-radius:2px;
+    background:#1a73e8;box-shadow:0 0 8px rgba(26,115,232,.9);
+    transform:translate(5px,-50%); /* sits just outside the dot edge */
+    display:none; /* hidden until we have a heading */
+  }
+  .tick-dim{opacity:.55} /* when using GPS course fallback */
+
+  /* Small button to enable compass on iOS */
+  .btn{
+    position:absolute;right:12px;top:12px;z-index:1000;
+    background:#0f1318;border:1px solid #2a3a4f;color:#bcd1ff;
+    padding:6px 10px;border-radius:16px;font-weight:700;
+  }
+  .btn.on{color:#fff;border-color:#1a73e8;box-shadow:0 0 10px rgba(26,115,232,.6)}
+</style>
 </head>
 <body>
-
 <div id="map"></div>
+<button id="compassBtn" class="btn">🧭 Enable Compass</button>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-  // Your public Mapbox token
-  mapboxgl.accessToken = 'pk.eyJ1IjoiYm1kMjM0NTY3IiwiYSI6ImNtYThuOHN5YzA3dDAybnB1bzNxZDY3cW8ifQ.fx86lChOVdESr3OII-C2NA';
+/* Map */
+const map = L.map('map').setView([38,-95],14);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:20}).addTo(map);
 
-  // Create the map
-  const map = new mapboxgl.Map({
-    container: 'map',
-    style: 'mapbox://styles/mapbox/streets-v11',
-    center: [0, 0], // Initial load location
-    zoom: 2
-  });
+/* Icon: dot + pulse + tiny tick */
+const dotIcon = L.divIcon({
+  className:'', iconSize:[20,20], iconAnchor:[10,10],
+  html:`<div class="dot-wrap">
+          <div class="pulse"></div>
+          <div class="loc-dot"></div>
+          <div class="heading-tick" id="tick"></div>
+        </div>`
+});
+const marker = L.marker([0,0],{icon:dotIcon,interactive:false}).addTo(map);
+const getWrap = () => marker.getElement()?.querySelector('.dot-wrap');
+const getTick = () => marker.getElement()?.querySelector('#tick');
 
-  // Add user location tracking control
-  const geolocate = new mapboxgl.GeolocateControl({
-    positionOptions: {
-      enableHighAccuracy: true
-    },
-    trackUserLocation: true,
-    showUserHeading: true
-  });
+/* Heading handling (compass first, GPS course fallback) */
+let headingDeg = null;           // smoothed heading
+let usingGpsCourse = false;
+const EMA = 0.25;                // smoothing
 
-  map.addControl(geolocate);
+function setHeading(deg, fromGps=false){
+  if (deg==null || isNaN(deg)) return;
+  const diff = headingDeg==null ? 0 : ((((deg - headingDeg)+540)%360)-180);
+  headingDeg = headingDeg==null ? deg : (headingDeg + diff*EMA + 360) % 360;
 
-  // Center the map on the user's location when it loads
-  map.on('load', () => {
-    geolocate.trigger();
-  });
+  const wrap = getWrap(), tick = getTick();
+  if (wrap && tick){
+    wrap.style.transform = `rotate(${headingDeg}deg)`;   // rotate marker group
+    wrap.style.setProperty('--hdg', `${headingDeg}deg`); // (kept for future)
+    tick.style.display = 'block';                        // show tiny tick
+    tick.classList.toggle('tick-dim', !!fromGps);        // dim when GPS fallback
+  }
+  usingGpsCourse = !!fromGps;
+}
+
+/* Compass listeners */
+function screenAngle(){
+  const so = screen.orientation && typeof screen.orientation.angle==='number' ? screen.orientation.angle
+           : (typeof window.orientation === 'number' ? window.orientation : 0);
+  return ((so%360)+360)%360;
+}
+function computeCompassHeading(alpha,beta=0,gamma=0){
+  const d=Math.PI/180,x=beta*d,y=gamma*d,z=alpha*d;
+  const cX=Math.cos(x),cY=Math.cos(y),cZ=Math.cos(z),sX=Math.sin(x),sY=Math.sin(y),sZ=Math.sin(z);
+  const Vx=-cZ*sY - sZ*sX*cY, Vy=-sZ*sY + cZ*sX*cY;
+  let h=Math.atan2(Vx,Vy)*180/Math.PI; if(h<0) h+=360; return h;
+}
+function attachOrientation(){
+  const abs = (e)=>{
+    let h=null;
+    if (typeof e.webkitCompassHeading==='number'){ h=e.webkitCompassHeading; }
+    else if (e.absolute===true && typeof e.alpha==='number'){
+      h = (computeCompassHeading(e.alpha, e.beta||0, e.gamma||0) + screenAngle()) % 360;
+    }
+    if (h!=null) setHeading(h,false);
+  };
+  const rel = (e)=>{
+    let h=null;
+    if (typeof e.webkitCompassHeading==='number'){ h=e.webkitCompassHeading; }
+    else if (typeof e.alpha==='number'){ h=(360 - e.alpha + screenAngle()) % 360; }
+    if (h!=null) setHeading(h,false);
+  };
+  window.addEventListener('deviceorientationabsolute', abs, true);
+  window.addEventListener('deviceorientation',          rel, true);
+  if (screen.orientation) screen.orientation.addEventListener('change', ()=>{ if(headingDeg!=null) setHeading(headingDeg,false); });
+  window.addEventListener('orientationchange', ()=>{ if(headingDeg!=null) setHeading(headingDeg,false); });
+}
+
+/* Button to request permission on iOS */
+const btn = document.getElementById('compassBtn');
+btn.addEventListener('click', async ()=>{
+  try{
+    if (typeof DeviceOrientationEvent!=='undefined' &&
+        typeof DeviceOrientationEvent.requestPermission==='function'){
+      const res = await DeviceOrientationEvent.requestPermission();
+      if (res!=='granted') return;
+    }
+    attachOrientation();
+    btn.classList.add('on'); btn.textContent='🧭 Compass On';
+  }catch(_){}
+}, {once:true});
+
+/* Geolocation: stick to GPS fixes (no predictive drift); pan-follow at street zooms */
+let firstFix = true;
+const geo = navigator.geolocation;
+if (geo){
+  geo.watchPosition(p=>{
+    const {latitude:lat, longitude:lng, heading:course, speed} = p.coords;
+    marker.setLatLng([lat,lng]);
+
+    // If we don't have compass, use GPS course when moving
+    if ((headingDeg==null) && course!=null && !isNaN(course) && (speed==null || speed>0.4)){
+      setHeading(course, true);
+    }
+
+    if (firstFix){ map.setView([lat,lng], 16); firstFix=false; }
+    if (map.getZoom() > 14) map.panTo([lat,lng], {animate:false});
+  }, err=>console.warn('GPS error:', err),
+  {enableHighAccuracy:true, maximumAge:0, timeout:5000});
+}
 </script>
-
 </body>
 </html>
